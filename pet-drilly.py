@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 from dataclasses import dataclass
+from math import sqrt
 from playsound3 import playsound
 from os.path import dirname
 from pathlib import Path
@@ -8,6 +9,7 @@ from tkinter import *
 from PIL import Image, ImageTk
 from itertools import count
 from random import randint, choice
+from time import time
 import psutil
 
 # updated in logic
@@ -41,14 +43,14 @@ class DrillyState:
 
 STATES = {
     "idle": DrillyState("DrillyNeutral.webp", 60000, [], {
-        "idle": 10,
+        "idle": 5,
         "noises": 5,
         "happy": 5,
         "sleep": 1,
         "talk": 2,
     }),
 
-    "noises": DrillyState("DrillyNeutral.webp", None, [
+    "noises": DrillyState("DrillyHappy.webp", None, [
         DrillyVoiceLine("Drilly_Giggle.mp3", None),
         DrillyVoiceLine("Drilly_Giggle2.mp3", None),
         DrillyVoiceLine("Drilly_Giggle3.mp3", None),
@@ -107,6 +109,8 @@ DRILLY_SIZE = 159
 GLOBAL_SCALE = 0.5      # Tweak Drilly's size
 GLOBAL_OFFS_LEFT = 0    # Move Drilly
 GLOBAL_OFFS_BOTTOM = 44 # Move Drilly
+
+PATTING_VELOCITY_THRESHOLD = 100 # pixels per second
 
 TEMP_SENSOR = "k10temp"
 
@@ -207,12 +211,22 @@ def create_dialog_window(text: str):
     dialog_window.after(VOICE_DURATION, dialog_window.destroy)
 
 drilly_state = DEFAULT_STATE
-def drilly_update_state():
+def drilly_choose_new_state():
     global drilly_state, img
     transitions = STATES[drilly_state].transitions
     drilly_state = probabilistic_select(transitions)
     verbose_log(f"State transition: {drilly_state}")
+
+drilly_timer = None
+drilly_sound = None
+def drilly_update_state():
+    global drilly_state, drilly_timer, drilly_sound, img
     state_info = STATES[drilly_state]
+
+    if drilly_timer:
+        drilly_window.after_cancel(drilly_timer)
+    if drilly_sound:
+        drilly_sound.stop()
 
     if img:
         img.close()
@@ -223,23 +237,54 @@ def drilly_update_state():
     if avg_time := state_info.average_time_ms:
         time = randint(int(avg_time * 0.5), int(avg_time * 1.5))
         verbose_log(f"Next transition after {time} ms")
-        drilly_window.after(time, drilly_update_state)
+        drilly_timer = drilly_window.after(time, drilly_choose_and_update_state)
     else:
         while voice_line := choice(state_info.voice_lines):
             if not voice_line.can_play_now():
                 continue
-            playsound(VOICE_BASE_DIR / voice_line.file, block=False)
+            drilly_sound = playsound(VOICE_BASE_DIR / voice_line.file, block=False)
             if voice_line.text:
                 create_dialog_window(voice_line.text)
             break
-        drilly_window.after(VOICE_DURATION, drilly_update_state)
+        drilly_timer = drilly_window.after(VOICE_DURATION, drilly_choose_and_update_state)
         verbose_log(f"Next transition after {VOICE_DURATION} ms")
+
+def drilly_choose_and_update_state():
+    drilly_choose_new_state()
+    drilly_update_state()
 
 # has the added effect of waking up the thread at least every second to accept signals
 def update_temperature():
     global current_temp
     current_temp = psutil.sensors_temperatures()[TEMP_SENSOR][0].current
     drilly_window.after(1000, update_temperature)
+
+last_pos = None
+distance_covered = 0
+distance_timer = None
+
+def motion_timeout():
+    global last_pos, distance_covered, distance_timer, drilly_state
+    if distance_covered > PATTING_VELOCITY_THRESHOLD:
+        drilly_state = "noises"
+        drilly_update_state()
+    distance_timer = None
+    distance_covered = 0
+    last_pos = None
+
+def cursor_motion(event):
+    global last_pos, distance_covered, distance_timer
+    x = event.x
+    y = event.y
+    if last_pos:
+        last_x, last_y = last_pos
+        distance = sqrt(((x - last_x) ** 2) + ((y - last_y) ** 2))
+        distance_covered += distance
+        if not distance_timer:
+            distance_timer = drilly_window.after(1000, motion_timeout)
+    last_pos = (x, y)
+
+drilly_img.bind("<Motion>", cursor_motion)
 
 drilly_update_state()
 update_temperature()
